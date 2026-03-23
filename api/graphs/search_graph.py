@@ -5,16 +5,22 @@ from dotenv import load_dotenv
 import os
 from pymongo import MongoClient
 from langgraph.graph import StateGraph, START, END
+from api.cache import RedisSemanticCache
 
 load_dotenv()
+cache = RedisSemanticCache()
 
+# ---------------------------- State ----------------------------
 class SearchState(TypedDict):
     query: str
     embedding: list[float]
     results: list[dict]
     reranked_results: list[dict]
     final_answer: str
+    cache_hit: bool
+    cached_answer: str
 
+# ---------------------------- Nodes ----------------------------
 def embed_query(state: SearchState) -> dict:
     embedding = OpenAIEmbeddings(model="text-embedding-3-small", api_key=os.getenv("OPENAI_API_KEY"))
     return {"embedding": embedding.embed_query(state["query"])}
@@ -63,15 +69,36 @@ def call_llm(state: SearchState) -> dict:
     ])
     return {"final_answer": response.content}
 
+# ---------------------------- Cache Nodes ----------------------------
+def check_cache(state: SearchState) -> dict:
+    cached_answer = cache.get(state["embedding"])
+    if cached_answer:
+        return {"cache_hit": True, "cached_answer": cached_answer, "final_answer": cached_answer}
+    return {"cache_hit": False, "cached_answer": ""}
+
+def update_cache(state: SearchState) -> dict:
+    cache.set(state["query"], state["final_answer"], state["embedding"])
+    return {}
+
+def route_after_cache(state: SearchState) -> str: # Conditional edge. If cache hit, end. Else, continue.
+    if state["cache_hit"]:
+        return "__end__" # equals END
+    return "vector_search"
+
 # ---------------------------- Graph ----------------------------
 graph = StateGraph(SearchState)
 graph.add_node("embed_query", embed_query)
 graph.add_node("vector_search", vector_search)
 graph.add_node("rerank", rerank)
 graph.add_node("call_llm", call_llm)
+graph.add_node("check_cache", check_cache)
+graph.add_node("update_cache", update_cache)
+
 graph.add_edge(START, "embed_query")
-graph.add_edge("embed_query", "vector_search")
+graph.add_edge("embed_query", "check_cache")
+graph.add_conditional_edges("check_cache", route_after_cache)
 graph.add_edge("vector_search", "rerank")
 graph.add_edge("rerank", "call_llm")
-graph.add_edge("call_llm", END)
+graph.add_edge("call_llm", "update_cache")
+graph.add_edge("update_cache", END)
 search_graph = graph.compile()
