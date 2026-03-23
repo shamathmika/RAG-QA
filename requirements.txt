@@ -1,0 +1,22 @@
+# Web framework
+django==4.2
+djangorestframework==3.15.2
+
+# AI / LLM
+openai==1.82.0
+langchain==0.3.25
+langchain-openai==0.3.18
+langchain-mongodb==0.5.0
+langgraph==0.4.1
+
+# MongoDB
+pymongo==4.12.1
+
+# Redis
+redis==5.3.0
+
+# PDF extraction
+PyMuPDF==1.25.5
+
+# Environment variables
+python-dotenv==1.1.0
