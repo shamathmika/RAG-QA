@@ -22,10 +22,27 @@ class SearchState(TypedDict):
 
 # ---------------------------- Nodes ----------------------------
 def embed_query(state: SearchState) -> dict:
+    """Generate a 1536D vector embedding for the user's query using OpenAI.
+
+    Args:
+        state: SearchState with 'query' (str) - the user's question.
+
+    Returns:
+        dict with 'embedding' (list[float]) - 1536-dimensional vector representation of the query.
+    """
     embedding = OpenAIEmbeddings(model="text-embedding-3-small", api_key=os.getenv("OPENAI_API_KEY"))
     return {"embedding": embedding.embed_query(state["query"])}
 
 def vector_search(state: SearchState) -> dict:
+    """Find the top 5 most similar document chunks using MongoDB Atlas Vector Search.
+
+    Args:
+        state: SearchState with 'embedding' (list[float]) - the query's vector embedding.
+
+    Returns:
+        dict with 'results' (list[dict]) - top 5 chunks, each with text, file_name,
+        page_number, and vectorSearchScore.
+    """
     client = MongoClient(os.getenv("MONGODB_URI"))
     collection = client["rag_db"]["documents"]
     results = collection.aggregate([ # Vector search - finds the most similar chunks to the query
@@ -50,6 +67,17 @@ def vector_search(state: SearchState) -> dict:
     return {"results": list(results)}
     
 def rerank(state: SearchState) -> dict:
+    """Re-score search results using a weighted combination of vector similarity and keyword overlap.
+
+    Formula: reranked_score = (vector_score * 0.7) + (keyword_score * 0.3)
+    Returns the top 3 results after re-scoring.
+
+    Args:
+        state: SearchState with 'query' (str) and 'results' (list[dict]) from vector search.
+
+    Returns:
+        dict with 'reranked_results' (list[dict]) - top 3 chunks sorted by reranked_score.
+    """
     query_words = state["query"].lower().split()
     for result in state["results"]:
         text_words = result["text"].lower().split()
@@ -59,6 +87,17 @@ def rerank(state: SearchState) -> dict:
     return {"reranked_results": sorted(state["results"], key=lambda x: x["reranked_score"], reverse=True)[:3]}
 
 def call_llm(state: SearchState) -> dict:
+    """Generate a natural language answer using GPT-4o-mini with retrieved context.
+
+    Builds a RAG prompt with system instructions to only use provided context,
+    preventing hallucination.
+
+    Args:
+        state: SearchState with 'query' (str) and 'reranked_results' (list[dict]).
+
+    Returns:
+        dict with 'final_answer' (str) - the LLM-generated response.
+    """
     llm = ChatOpenAI(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
     context = "\n\n---\n\n".join(
         [chunk["text"] for chunk in state["reranked_results"]]
@@ -71,16 +110,40 @@ def call_llm(state: SearchState) -> dict:
 
 # ---------------------------- Cache Nodes ----------------------------
 def check_cache(state: SearchState) -> dict:
+    """Check Redis semantic cache for a similar previously-answered question.
+
+    Args:
+        state: SearchState with 'embedding' (list[float]) - the query's vector embedding.
+
+    Returns:
+        dict with 'cache_hit' (bool), 'cached_answer' (str), and 'final_answer' (str) if hit.
+    """
     cached_answer = cache.get(state["embedding"])
     if cached_answer:
         return {"cache_hit": True, "cached_answer": cached_answer, "final_answer": cached_answer}
     return {"cache_hit": False, "cached_answer": ""}
 
 def update_cache(state: SearchState) -> dict:
+    """Store the question-answer pair in Redis semantic cache for future lookups.
+
+    Args:
+        state: SearchState with 'query' (str), 'final_answer' (str), and 'embedding' (list[float]).
+
+    Returns:
+        Empty dict - nothing new to add to state.
+    """
     cache.set(state["query"], state["final_answer"], state["embedding"])
     return {}
 
-def route_after_cache(state: SearchState) -> str: # Conditional edge. If cache hit, end. Else, continue.
+def route_after_cache(state: SearchState) -> str:
+    """Conditional routing function: skip to END on cache hit, continue to vector_search on miss.
+
+    Args:
+        state: SearchState with 'cache_hit' (bool).
+
+    Returns:
+        str - '__end__' if cache hit, 'vector_search' if cache miss.
+    """
     if state["cache_hit"]:
         return "__end__" # equals END
     return "vector_search"
@@ -101,4 +164,5 @@ graph.add_edge("vector_search", "rerank")
 graph.add_edge("rerank", "call_llm")
 graph.add_edge("call_llm", "update_cache")
 graph.add_edge("update_cache", END)
+
 search_graph = graph.compile()
